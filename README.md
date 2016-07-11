@@ -56,4 +56,103 @@
 &emsp;&emsp;&emsp;本章关注锁顺序死锁问题，死锁的原因在于：**两个线程以不同的顺序获取相同的锁。如果按照相同的顺序来请求锁，就不会出现循环的加锁依赖性。**
 
 ---
-###&emsp;&emsp;
+###&emsp;&emsp;Chapter5:条件队列 - 等待唤醒机制
+
+&emsp;&emsp;&emsp;1.状态依赖的管理
+
+&emsp;&emsp;&emsp;&emsp;&emsp;在单线程程序中调用一个方法，如果某个基于状态的前提条件未得到满足，那么这个条件将永远无法成真。但在并发程序中，基于状态的条件可能会由于其他线程的操作而改变。对于并发对象上前提条件的管理，通常要用到阻塞或轮询。
+
+&emsp;&emsp;&emsp;&emsp;&emsp;首先，这里有一个有界缓存池例子，get方法将从容器中获取元素，当为空时，阻塞。put方法将元素放入缓存中，若已满，阻塞。
+
+&emsp;&emsp;&emsp;&emsp;&emsp;我们看下面的put方法实现：
+	
+	public boolean put(V v){
+		synchronized(this){
+			if(!isFull){
+				items.add(v);
+				return true
+			}else{
+				//如果已满，返回false或抛出异常。		
+				//return false;
+				//throw ...
+			}
+		}
+	}
+
+&emsp;&emsp;&emsp;&emsp;&emsp;对于上面的实现，客户端程序需要自己去处理当条件不满足时的问题。通常情况下(在并发程序下)，我们会一等待知道条件为真。这时，有两种实现方式：
+
+&emsp;&emsp;&emsp;&emsp;&emsp;**1).使用轮询来“等待”条件为真：**
+
+	public void put(V v){
+		while(true){	
+			synchronized(this){	
+				if(!isFull)		
+					items.add(v);	
+			}
+		}
+	}
+
+&emsp;&emsp;&emsp;&emsp;&emsp;上面这种实现显然不是真的让线程休眠或挂起，而是通过循环来“轮询”。这种方式就好像你烤面包时需要不停的检查是否烤好了面包。
+
+&emsp;&emsp;&emsp;&emsp;&emsp;2).使用**条件队列(等待唤醒)**机制：
+
+	public void put(V v){
+		synchronized(this){	
+			while(isFull)
+				await();
+		
+			items.add(v);					
+			notifyAll();
+		}
+	}
+
+&emsp;&emsp;&emsp;&emsp;&emsp;条件队列就好像烤面包机中通知“面包已烤好”的铃声。如果面包考好了你会**立即**得到通知。这将提供更好的响应性。
+
+&emsp;&emsp;&emsp;&emsp;&emsp;下面是关于条件谓词的详细解释：
+
+&emsp;&emsp;&emsp;&emsp;&emsp;1).正如每个Java对象都可以作为一个锁，每个对象同样可以作为一个条件队列，并且Object中的wait,notify，notifyAll方法构成了内部条件队列的API。**对象的内置锁与其内部条件队列是相互关联的，要调用对象x中条件队列的任何方法，必须持有对象x上的锁。**
+
+&emsp;&emsp;&emsp;&emsp;&emsp;2).Object.wait会自动释放锁，并请求操作系统挂起当前线程。**当挂起的线程醒来时(通常是由另一个线程唤醒)，会自动尝试重新获得锁。若在醒来后没有获得锁(当使用notifyAll时，这里会发生锁竞争)，wait方法不会返回。**
+
+&emsp;&emsp;&emsp;&emsp;&emsp;3).**条件谓词**：条件谓词是使某个操作成为**状态依赖操作**的前提条件。例如上面缓存池例子中，put状态依赖操作的条件谓词(前提条件)为“非满”，get状态依赖操作的条件谓词(前提条件)是“非空”。
+
+&emsp;&emsp;&emsp;&emsp;&emsp;4).**过早唤醒**：**当存在多个条件谓词与一个条件队列(对象)相关联时，会发生过早唤醒的情况。**put方法在每次操作完都会调用一此notifyAll()，这可能会唤醒执行同种功能的线程而前提条件不一定为真。使用notifyAll还有一个问题就是由于它会唤醒所有这些线程，使得它们在锁上发生竞争最终只有一个线程可以执行，它们中的绝大多数或者全部都将继续回到休眠状态。这可能会造成很多不必要的性能损耗。
+
+
+
+&emsp;&emsp;&emsp;2.显示锁(ReentrantLock)和读写锁(ReadAndWriteLock)
+
+&emsp;&emsp;&emsp;&emsp;&emsp;1).ReentrantLock提供了与synchronized相同的**互斥性和内存可见性**。
+
+&emsp;&emsp;&emsp;&emsp;&emsp;2).读-写锁(Read-Write Lock)：ReentrantLock实现了一种标准的互斥锁，每次最多只有一个线程能持有ReentrantLock。然而，互斥通常是一种过于强硬的加锁规则。互斥，虽然可以避免“写/写”冲突和“写/读”冲突，但同样也避免了“读/读”冲突。**ReentrantLock提供了读写锁：一个资源可以被多个读操作访问，或者被一个写操作访问，但两者不能同时进行。**
+
+&emsp;&emsp;&emsp;&emsp;&emsp;3).显示的Condition对象：内置条件队列(Object提供的wait, notify, notifyAll)存在一些缺陷，每个内置锁都只能有一个相关联的条件队列，多个线程可能在同一个条件队列上等待不同的条件谓词。显示锁提供了显示的Condition，通过lock.newCondition使得显示锁可以与多个条件队列相关联。这样，我们可以避免使用notifyAll，从而提供并发程序的响应性能。
+
+---
+###&emsp;&emsp;Chapter6:同步工具
+
+&emsp;&emsp;&emsp;1.信号量(Semaphore) - 计数信号量：用来控制同时访问某个特定资源的操作数量，或者同时执行某个指定操作的数量。Semaphore中管理的一组虚拟的许可(permit)，acquire将阻塞直到有许可，release方法将返回一个许可给信号量。
+
+&emsp;&emsp;&emsp;2.闭锁(Latch，CountDownLatch):闭锁状态包括一个计数器，该计数器被初始化为一个正数，表示需要等待的事件数量。countDown方法递减计数器，await方法等待计数器为零。
+
+---
+###&emsp;&emsp;Chapter7:原子变量和非阻塞同步机制 (CAS)
+
+&emsp;&emsp;&emsp;锁的劣势：如果有多个线程同时请求锁，那么一些线程将被挂起并在稍后恢复运行。在挂起和恢复线程等过程中存在着很大的开销。
+
+&emsp;&emsp;&emsp;锁定方式对于细粒度(例如递增计数器)复合操作来说是一种高开销的机制，独占锁是一项悲观技术-它假设最坏的情况（如果你不锁门，那么捣蛋鬼就会闯入并搞得一团糟）。对于细粒度的操作，还有另一种更高效的方法，也就是乐观的方式。这种方式需要借助冲突检查机制来判断在更新过程中是否存在来自有其他线程的干扰，如果存在，这个操作将失败，并且可以重试(也可以不重试)。
+
+&emsp;&emsp;&emsp;**3.比较并交换(Compare-And-Swap)**：CAS包含了3个操作数 - 需要读写的内存位置V，进行比较的值A和拟写入的新值B。当且仅当V的值等于A时，CAS才会通过原子方式用新值B来更新V的值，否则不执行任何操作。**当多个线程尝试使用CAS同时更新同一个变量时，只有其中一个线程能更新变量的值，而其他线程都将失败。然而，失败的线程并不会被挂起，而是被告知在这次竞争中失败，并可以再次尝试。**
+
+2.原子变量(AtomicXxx)：在细粒度的复合操作中使用CAS最好。关于细粒度的复合操作，例如
+++count，看起来只有一句，但包含三个独立的操作：读取count，依赖于读取的值加一，将新值写入。
+很显然这看似一句的代码并不是一个原子操作。如果使用同步锁来保证线程安全性，会有很大的性能损耗。java5.0的AtomicXxx原子变量包含compareAndSet，increase等操作可以在不加锁的情况下提供非阻塞同步机制。
+
+
+
+
+
+
+
+
+
